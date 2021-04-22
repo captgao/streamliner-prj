@@ -159,7 +159,6 @@ public class WALAOracle implements TypeQueryOracle {
 	public Optional<Type> queryType(Context context, MethodInsnNode minsn, InterValue receiver) {
 		if(context.getOwner().contains("LambdaModel$"))
 			return Optional.empty();
-
 		if(!initialised) init();
 		if(!initialisedSuccessfully) return Optional.empty();
 

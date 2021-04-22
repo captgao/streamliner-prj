@@ -5,9 +5,9 @@ import os
 from pathlib import Path
 from subprocess import run, CalledProcessError
 
-JAVA_8  = '/usr/lib/jvm/java-8-oracle-amd64'
-JAVA_11 = '/usr/lib/jvm/java-1.11.0-openjdk-amd64'
-JAVA_13 = '/usr/lib/jvm/java-1.13.0-openjdk-amd64'
+JAVA_8  = '/usr/lib/jvm/java-8-openjdk-amd64'
+JAVA_11 = '/usr/lib/jvm/java-11-openjdk-amd64'
+JAVA_13 = '/usr/share/jdk-15.0.2'
 ENV = dict(os.environ, JAVA_HOME=JAVA_13)
 
 cwd = Path(__file__).parent

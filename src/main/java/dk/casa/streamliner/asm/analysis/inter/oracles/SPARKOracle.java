@@ -12,6 +12,7 @@ import org.objectweb.asm.tree.*;
 import soot.*;
 import soot.jimple.InstanceInvokeExpr;
 import soot.jimple.Stmt;
+import soot.jimple.toolkits.callgraph.Edge;
 import soot.options.Options;
 import soot.tagkit.LineNumberTag;
 
@@ -85,6 +86,8 @@ public class SPARKOracle extends StreamLibraryOracle {
 		Scene.v().addBasicClass("android.os.Handler");
 
 		Scene.v().loadNecessaryClasses();
+
+
 	}
 
 	private void init() {
@@ -107,7 +110,6 @@ public class SPARKOracle extends StreamLibraryOracle {
 			exc.printStackTrace();
 			queryResults.add("initFail");
 		}
-
 		classPath = null; entryPoints = null;
 	}
 

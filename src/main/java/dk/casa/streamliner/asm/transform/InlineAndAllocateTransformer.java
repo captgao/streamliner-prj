@@ -3,6 +3,7 @@ package dk.casa.streamliner.asm.transform;
 import dk.casa.streamliner.NotImplementedException;
 import dk.casa.streamliner.asm.ClassNodeCache;
 import dk.casa.streamliner.asm.InlineMethod;
+import dk.casa.streamliner.asm.RQ2.Experiment;
 import dk.casa.streamliner.asm.Utils;
 import dk.casa.streamliner.asm.analysis.FlatElement;
 import dk.casa.streamliner.asm.analysis.InstructionStackEffect;
@@ -23,7 +24,9 @@ import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
+import static dk.casa.streamliner.asm.RQ2.Experiment.*;
 import static org.objectweb.asm.Opcodes.*;
 
 public class InlineAndAllocateTransformer {
@@ -94,7 +97,7 @@ public class InlineAndAllocateTransformer {
 
 		preAnalysis.run(initialContext, escapedSet);
 
-		System.err.println("Locals before transform: " + method.maxLocals);
+		System.out.println("Locals before transform: " + method.maxLocals);
 		recursiveTransform(initialContext, idMap, null, 0);
 
 		method.instructions.insert(methodStart);
@@ -189,14 +192,12 @@ public class InlineAndAllocateTransformer {
 		});
 	}
 
-
 	private void recursiveTransform(Context context, Map<Integer, Integer> vars,
 	                                LabelNode endLabel, int initialStackHeight) throws AnalyzerException {
-
 		MethodNode mth = context.getMethod();
 		InterFrame[] frames = InterproceduralTypePointerAnalysis.calls.get(context);
 		InsnList instructions = mth.instructions;
-
+		ClassNode copy = null;
 		if(instructions.size() != frames.length)
 			throw new RuntimeException("bug!");
 
@@ -233,6 +234,14 @@ public class InlineAndAllocateTransformer {
 				// We have to recompute these later
 				instructions.remove(insn);
 			} else if(insn instanceof MethodInsnNode) {
+//				MethodInsnNode minsn = (MethodInsnNode) insn;
+//				if(isStreamConstructor(minsn) && minsn.getOpcode() != INVOKESTATIC && Utils.getAncestors(Type.getObjectType(minsn.owner)).contains(Type.getObjectType("java/util/Collection"))){
+//					if(copy == null) copy = freshArrayList();
+//					mth.instructions.insertBefore(minsn, new TypeInsnNode(CHECKCAST, copy.name));
+//					MethodInsnNode newInsn = (MethodInsnNode) minsn.clone(new HashMap<>());
+//					newInsn.owner = copy.name;
+//					mth.instructions.set(minsn, newInsn);
+//				}
 				performInlining(context, (MethodInsnNode) insn, i, instructions, frames[i], initialStackHeight);
 			} else if(opcode == NEW) { // Stack allocation stuff
 				TypeInsnNode tinsn = (TypeInsnNode) insn;
@@ -463,7 +472,6 @@ public class InlineAndAllocateTransformer {
 
 	private void performInlining(Context context, MethodInsnNode minsn, int insnIndex, InsnList instructions,
 	                             InterFrame frame, int initialStackHeight) throws AnalyzerException {
-
 		Set<Integer> calls = InterproceduralTypePointerAnalysis.analysedCalls.get(context);
 		if(calls == null || !calls.contains(insnIndex)) return;
 
@@ -530,10 +538,10 @@ public class InlineAndAllocateTransformer {
 		instructions.insertBefore(minsn, new CommentNode(String.format("Start of inlined %s.%s", itarget.owner, target.name)));
 
 		recursiveTransform(callContext, remappedLocals, endLabelNode, newStackHeight);
-
 		instructions.insertBefore(minsn, target.instructions);
 		instructions.insertBefore(minsn, endLabelNode);
 		instructions.insertBefore(minsn, new CommentNode(String.format("End of inlined %s.%s", itarget.owner, target.name)));
 		instructions.remove(minsn);
+
 	}
 }

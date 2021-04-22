@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -euo pipefail
-
 if [ ! -f "pom.xml" ]; then
   cd ..
   if [ ! -f "pom.xml" ]; then

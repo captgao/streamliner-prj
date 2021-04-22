@@ -4,6 +4,7 @@ import dk.casa.streamliner.asm.analysis.inter.Context;
 import dk.casa.streamliner.asm.analysis.inter.InterValue;
 import dk.casa.streamliner.asm.analysis.inter.oracles.Oracle;
 import dk.casa.streamliner.asm.analysis.inter.oracles.StreamLibraryOracle;
+import dk.casa.streamliner.asm.analysis.inter.oracles.WALAOracle;
 import dk.casa.streamliner.asm.transform.InlineAndAllocateTransformer;
 import dk.casa.streamliner.asm.transform.LambdaPreprocessor;
 import dk.casa.streamliner.asm.transform.LocalVariableCleanup;
@@ -16,6 +17,7 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.analysis.AnalyzerException;
 import org.objectweb.asm.util.CheckMethodAdapter;
 
+import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.HashMap;
@@ -46,9 +48,14 @@ public class OptimizeSkeleton {
 		ClassNode loaded = Utils.loadClassFile(new File("path/to/Example.class"));
 		ClassNodeCache.put(loaded.name, loaded);
 		 */
-
-		ClassNode cn = ClassNodeCache.get("Example");
-
+		ClassNode loaded = Utils.loadClassFile(new File("D:/TestClass.class"));
+		System.out.println(loaded.name);
+		ClassNodeCache.put(loaded.name, loaded);
+		ClassNode cn = ClassNodeCache.get(loaded.name);
+		for(ClassNode cls : Utils.loadJarFile(new File("d:/spring-data-commons-2.4.3.jar")))
+			ClassNodeCache.put(cls.name, cls);
+		ClassNode alc = Utils.loadClassFile(new File("D:/ArrayList.class"));
+		ClassNodeCache.put(alc.name, alc);
 		/* If the class references other classes that are not on the classpath
 		 * (classes in the same project or external dependencies), they must
 		 * also be put into the cache before the analysis starts:
@@ -59,7 +66,7 @@ public class OptimizeSkeleton {
 		 */
 
 		/* We then select the method from the class that we want to optimise: */
-		MethodNode mn = Utils.getMethod(cn, method -> method.name.equals("toOptimize")).orElseThrow(NoSuchElementException::new);
+		MethodNode mn = Utils.getMethod(cn, method -> method.name.equals("test")).orElseThrow(NoSuchElementException::new);
 
 		/* We can print the method before optimization. */
 		System.out.println(Decompile.run(mn));
@@ -81,10 +88,11 @@ public class OptimizeSkeleton {
 			 * The RQ2 experiments use some heuristics and an implementation of a Class Hierarchy Analysis,
 			 * see dk.casa.streamliner.asm.RQ2.{CHA,Experiment}
 			 */
+
 			Oracle oracle = new StreamLibraryOracle() {
 				@Override
 				public Optional<Type> queryType(Context context, MethodInsnNode minsn, InterValue receiver) {
-					/* If we know that the method only creates streams from ArrayLists, we can use the following implementation: */
+					// If we know that the method only creates streams from ArrayLists, we can use the following implementation:
 					if(minsn.name.equals("stream") &&
 							Utils.getAncestors(Type.getObjectType(minsn.owner)).contains(Type.getObjectType("java/util/Collection")))
 						return Optional.of(Type.getObjectType("java/util/ArrayList"));
@@ -124,7 +132,7 @@ public class OptimizeSkeleton {
 		ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
 		cn.accept(cw);
 
-		try(FileOutputStream fos = new FileOutputStream("path/to/Example.class")) {
+		try(FileOutputStream fos = new FileOutputStream("TestClassOpt.class")) {
 			fos.write(cw.toByteArray());
 		}
 	}

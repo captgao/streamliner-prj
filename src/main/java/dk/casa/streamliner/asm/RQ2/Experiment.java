@@ -20,14 +20,13 @@ import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.filefilter.FileFilterUtils;
 import org.apache.commons.io.input.MessageDigestCalculatingInputStream;
 import org.apache.commons.math3.util.Pair;
+import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.*;
 import org.objectweb.asm.tree.analysis.AnalyzerException;
 import org.objectweb.asm.util.CheckMethodAdapter;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
+import java.io.*;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -50,7 +49,7 @@ public class Experiment {
 
 	private static final Type streamT = Type.getObjectType("java/util/stream/BaseStream");
 
-	private static boolean isStreamType(Type type) {
+	public static boolean isStreamType(Type type) {
 		try {
 			return Utils.getAncestors(type).contains(streamT);
 		} catch(RuntimeException exc) {
@@ -59,7 +58,7 @@ public class Experiment {
 		}
 	}
 
-	private static boolean isStreamConstructor(AbstractInsnNode insn) {
+	public static boolean isStreamConstructor(AbstractInsnNode insn) {
 		if(!(insn instanceof MethodInsnNode)) return false;
 		MethodInsnNode minsn = (MethodInsnNode) insn;
 		Type returnType = Type.getReturnType(minsn.desc);
@@ -96,9 +95,9 @@ public class Experiment {
 	private static int clearAccess(int access) {
 		return access & ~(ACC_PUBLIC | ACC_PRIVATE | ACC_PROTECTED);
 	}
-
+	static ArrayList<ClassNode> copyNodes = new ArrayList<>();
 	private static int freshCounter = 0;
-	private static ClassNode freshArrayList() {
+	public static ClassNode freshArrayList() {
 		ClassNode splitCopy = new ClassNode();
 		ClassNodeCache.get("java/util/ArrayList$ArrayListSpliterator").accept(splitCopy);
 		splitCopy.name = String.format("ArrayListCopy%d$Spliterator", freshCounter);
@@ -146,7 +145,11 @@ public class Experiment {
 		}
 
 		ClassNodeCache.put(splitCopy.name, splitCopy);
+		System.out.println("Made copy " + splitCopy.name);
 		ClassNodeCache.put(copy.name, copy);
+		System.out.println("Made copy " + copy.name);
+		copyNodes.add(splitCopy);
+		copyNodes.add(copy);
 		return copy;
 	}
 
@@ -173,6 +176,36 @@ public class Experiment {
 		}
 	}
 
+	public static void preprocessStreamConstructors(MethodNode mn, String possibleType) {
+	 	System.out.println("preprocess for " + mn.name + " " + possibleType);
+		ClassNode copy = null;
+		ListIterator<AbstractInsnNode> it = mn.instructions.iterator();
+		while(it.hasNext()) {
+			AbstractInsnNode insn = it.next();
+			if(insn.getOpcode() == CHECKCAST && ((TypeInsnNode) insn).desc.contains("ArrayListCopy")) return; // Already preprocessed
+			if(!(insn instanceof MethodInsnNode)) continue;
+			MethodInsnNode minsn = (MethodInsnNode) insn;
+			if(!isConstructor(minsn, possibleType)
+					|| minsn.getOpcode() == INVOKESTATIC) continue;
+
+			if(copy == null) copy = freshArrayList();
+			mn.instructions.insertBefore(minsn, new TypeInsnNode(CHECKCAST, copy.name));
+			MethodInsnNode newInsn = (MethodInsnNode) minsn.clone(new HashMap<>());
+			newInsn.owner = copy.name;
+			it.set(newInsn);
+			System.out.println("preprocessed for method " + mn.name);
+			System.out.println(Decompile.run(mn));
+		}
+	}
+
+	private static boolean isConstructor(MethodInsnNode minsn, String possibleType) {
+		Type returnType = Type.getReturnType(minsn.desc);
+		if(!returnType.getInternalName().startsWith(possibleType)) return false;
+		if(Stream.of(Type.getArgumentTypes(minsn.desc)).anyMatch(x -> x.getInternalName().startsWith(possibleType))) return false;
+		if(minsn.getOpcode() == INVOKESTATIC) return true;
+		return !minsn.owner.startsWith(possibleType);
+	}
+
 	private static String hashFile(File file) {
 	 	try {
 		    MessageDigest md = MessageDigest.getInstance("SHA-256");
@@ -191,7 +224,8 @@ public class Experiment {
 	private static Collection<File> getLibraries(Path repo) {
 		return FileUtils.listFiles(repo.toFile(), FileFilterUtils.asFileFilter(file -> {
 			String path = file.getPath();
-			return path.endsWith(".jar") && (path.contains("gcache/caches/modules-2/") || path.contains("libs/"));
+			System.out.println(path);
+			return path.endsWith(".jar") ;
 		}), FileFilterUtils.trueFileFilter());
 	}
 
@@ -258,14 +292,88 @@ public class Experiment {
 	private static final Counter<String> resolveStat = new Counter<>(),
 										 queryStats = new Counter<>();
 
+	private static void preprocessStreamMethods(List<ClassNode> classes) throws Exception{
+		HashSet<Pair<ClassNode,MethodNode>> methodSet = new HashSet<>();
+		for(ClassNode cn: classes) {
+			for (MethodNode mn : cn.methods) {
+				if (Type.getReturnType(mn.desc).getInternalName().startsWith("java/util/stream")) {
+					preprocessStreamConstructors(mn);
+					for (AbstractInsnNode insn : mn.instructions) {
+						if (insn instanceof FieldInsnNode) {
+							Optional<FieldNode> fnOpt = cn.fields.stream().filter(n -> n.name.equals(((FieldInsnNode) insn).name)).findAny();
+							if (!fnOpt.isPresent()) {
+								throw new Exception("Internal Error: Reference to undefined field");
+							}
+							FieldNode fn = fnOpt.get();
+							fn.access = clearAccess(fn.access) | ACC_PUBLIC;
+							System.out.println("Detected field access in " + cn.name + "," + mn.name);
+						}
+						if (insn instanceof MethodInsnNode) {
+							MethodInsnNode minsn = (MethodInsnNode) insn;
+
+							if (minsn.owner.equals(cn.name)) {
+								System.out.println("MInsN Owner: " + minsn.owner + " ClassNode Name: " + cn.name);
+								Optional<MethodNode> methodNode = cn.methods.stream().filter(n -> n.name.equals(minsn.name)).findAny();
+								if (!methodNode.isPresent()) {
+									throw new Exception("Internal Error: Reference to undefined method");
+								}
+								methodSet.add(new Pair<>(cn, methodNode.get()));
+							}
+
+						}
+					}
+				}
+			}
+		}
+		Queue<Pair<ClassNode,MethodNode>> methodQueue = new LinkedList<>(methodSet);
+		while(!methodQueue.isEmpty()){
+
+
+			Pair<ClassNode,MethodNode> nodes = methodQueue.poll();
+			ClassNode cn = nodes.getFirst();
+			MethodNode mn = nodes.getSecond();
+			if(Type.getReturnType(mn.desc).getInternalName().startsWith("java/util/Spliterator")){
+				preprocessStreamConstructors(mn, "java/util/Spliterator");
+			}
+			else if(Type.getReturnType(mn.desc).getInternalName().startsWith("java/util/Iterator")){
+				preprocessStreamConstructors(mn, "java/util/Iterator");
+			}
+			else{
+				continue;
+			}
+			for(AbstractInsnNode insn: mn.instructions) {
+				if (insn instanceof FieldInsnNode) {
+					Optional<FieldNode> fnOpt = cn.fields.stream().filter(n -> n.name.equals(((FieldInsnNode) insn).name)).findAny();
+					if (!fnOpt.isPresent()) {
+						throw new Exception("Internal Error: Reference to undefined field");
+					}
+					FieldNode fn = fnOpt.get();
+					fn.access = clearAccess(fn.access) | ACC_PUBLIC;
+					System.out.println("Detected field access in " + cn.name + "," + mn.name);
+				}
+				if (insn instanceof MethodInsnNode) {
+					MethodInsnNode minsn = (MethodInsnNode) insn;
+					if (minsn.owner.equals(cn.name)) {
+						Optional<MethodNode> methodNode = cn.methods.stream().filter(n -> n.name.equals(minsn.name)).findAny();
+						if (!methodNode.isPresent()) {
+							throw new Exception("Internal Error: Reference to undefined method");
+						}
+						Pair<ClassNode,MethodNode> newNode = new Pair<>(cn,methodNode.get());
+						if(!methodSet.contains(newNode)){
+							methodSet.add(newNode);
+							methodQueue.offer(newNode);
+						}
+					}
+				}
+			}
+		}
+		for(ClassNode cn: classes){
+			System.out.println(Decompile.run(cn));
+		}
+	}
 	private static Result process(Path repo, OracleFactory oracleFactory) {
 	 	Result result = new Result();
 		System.out.println("\n" + repo);
-		if(!repo.resolve(".built").toFile().exists() || !repo.resolve(".libs").toFile().exists()) {
-			System.out.println("Skipping since .built or .libs is missing");
-			return result;
-		}
-
 		Collection<File> classFiles = FileUtils.listFiles(repo.toFile(), FileFilterUtils.suffixFileFilter(".class"),
 				FileFilterUtils.asFileFilter(name -> !name.getPath().contains("gcache/caches")));
 		if(classFiles.isEmpty()) {
@@ -314,10 +422,18 @@ public class Experiment {
 		System.out.println("Loaded " + classes.size() + " class files");
 		System.out.println("Found " + entryPoints.size() + " entrypoints");
 
+		try{
+			preprocessStreamMethods(classes);
+		}
+		catch(Exception e){
+			e.printStackTrace();
+		}
+
 		projectClasses.addAll(classes);
 		TypeQueryOracle delegateOracle = oracleFactory.create(jarFiles, classPathFolders, entryPoints, projectClasses);
 		RQ2Oracle oracle = new RQ2Oracle(delegateOracle, new CHA(projectClasses));
 		projectClasses.clear();
+
 
 		List<Pair<ClassNode, MethodNode>> methodsWithPipelines = classes.stream()
 				.flatMap(cn -> cn.methods.stream().map(mn -> new Pair<>(cn, mn)))
@@ -330,15 +446,15 @@ public class Experiment {
 
 		result.put("methodsWithPipelines", methodsWithPipelines.size());
 		System.out.println("" + methodsWithPipelines.size() + " methods with pipelines.");
+		List<Pair<ClassNode, MethodNode>> res = new ArrayList<>();
 		methodsWithPipelines.forEach(pr -> {
 			ClassNode cn = pr.getFirst();
 			String owner = cn.name;
-
 			// Copy to prevent modified methods in old cache from retaining objects
 			MethodNode orig = pr.getSecond();
 			MethodNode mn = new MethodNode(orig.access, orig.name, orig.desc, orig.signature, orig.exceptions.toArray(new String[0]));
 			orig.accept(mn);
-
+			System.out.println(mn.name);
 			int parallelCount = (int)Utils.instructionStream(mn).filter(Experiment::isParallel).count();
 			if(parallelCount > 0) {
 				result.inc("parallelSkip", parallelCount);
@@ -354,12 +470,13 @@ public class Experiment {
 			try {
 				ClassNodeCache.push();  // Start a new cache
 
-				//preprocessStreamConstructors(mn);
+				preprocessStreamConstructors(mn);
 				new LambdaPreprocessor(mn).preprocess();
 				new InlineAndAllocateTransformer(owner, mn, oracle, false).transform();
 				new LocalVariableCleanup(owner, mn).run();
 				SlidingWindowOptimizer.run(mn);
 				new LambdaPreprocessor(mn).postprocess();
+
 
 				CheckMethodAdapter cma = new CheckMethodAdapter(mn.access, mn.name, mn.desc, null, new HashMap<>());
 				cma.version = V1_8;
@@ -383,11 +500,10 @@ public class Experiment {
 
 					result.inc("failSorted", Integer.min(pipelines - opt - concat, sorted));
 				}
-
-				//String afterOptimisation = Decompile.run(mn);
-				//System.out.println("Optimised: " + beforeOptimisation.equals(afterOptimisation));
-				//System.out.println(afterOptimisation);
-
+				String afterOptimisation = Decompile.run(mn);
+				System.out.println("Optimised: " + beforeOptimisation.equals(afterOptimisation));
+				System.out.println(afterOptimisation);
+				res.add(new Pair<>(cn, mn));
 			} catch(Exception exc) {
 				System.err.println("Analysis failed!");
 				String message = exc.getMessage();
@@ -429,7 +545,40 @@ public class Experiment {
 				ClassNodeCache.pop();
 			}
 		});
+		res.forEach(p ->{
+			ClassNode cn = p.getFirst();
+			MethodNode mn = p.getSecond();
+			for(int i = 0; i < cn.methods.size(); i++)
+			{
+				if(cn.methods.get(i).name.equals(mn.name)){
+					cn.methods.set(i, mn);
+				}
+			}
+		});
+		for(ClassNode cn: classes){
+			ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+			cn.accept(cw);
 
+			try(FileOutputStream fos = new FileOutputStream("optimized/" + cn.name + ".class")) {
+				fos.write(cw.toByteArray());
+			} catch (FileNotFoundException e) {
+				e.printStackTrace();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+		for(ClassNode cn: copyNodes){
+			ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+			cn.accept(cw);
+
+			try(FileOutputStream fos = new FileOutputStream("optimized/" + cn.name + ".class")) {
+				fos.write(cw.toByteArray());
+			} catch (FileNotFoundException e) {
+				e.printStackTrace();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
 		Counter<String> stats = null;
 		if(delegateOracle instanceof WALAOracle) stats = ((WALAOracle) delegateOracle).queryStats;
 		else if(delegateOracle instanceof SPARKOracle) stats = ((SPARKOracle) delegateOracle).queryResults;
@@ -438,11 +587,13 @@ public class Experiment {
 			System.out.println("Query stats: " + stats);
 			queryStats.add(stats);
 		}
-
 		return result;
 	}
 
 	public static void main(String[] args) throws IOException {
+
+		System.out.println(System.getProperty("java.specification.version"));
+		System.out.println(System.getProperty("java.runtime.version"));
 		Path rq2dir = Paths.get("RQ2/repos");
 
 		OracleFactory oracleFactory;
